@@ -294,6 +294,67 @@ class TestGenerateUserStoriesTool:
     @patch("src.mcp_tools.generation.sync_drafts_to_conversation", new_callable=AsyncMock)
     @patch("src.mcp_tools.generation.get_settings")
     @patch("src.mcp_tools.generation.AzureOpenAIClient")
+    async def test_execute_without_devops_token_and_with_explicit_count(
+        self,
+        mock_openai_cls: MagicMock,
+        mock_get_settings: MagicMock,
+        mock_sync: AsyncMock,
+        session_manager: AsyncMock,
+        sample_generation_result: GenerationResult,
+    ) -> None:
+        """Draft generation uses the signed-in session and honors explicit item counts."""
+        mock_get_settings.return_value = _mock_settings()
+        mock_openai = _build_openai_mock(
+            generate_user_stories=sample_generation_result
+        )
+        mock_openai_cls.return_value = mock_openai
+        context = ToolContext(
+            session_id="sess-supabase-001",
+            user_id="supabase:user",
+            project_id="MDP",
+            project_name="My discovery project",
+            access_token=None,
+        )
+
+        result = await GenerateUserStoriesTool(session_manager).execute(
+            context,
+            requirements="Generate exactly 6 Epics.",
+            count=6,
+        )
+
+        assert result.status == ToolStatus.SUCCESS
+        mock_openai.generate_user_stories.assert_awaited_once_with(
+            requirements="Generate exactly 6 Epics.",
+            context="",
+            board_context=None,
+            count=6,
+        )
+        session_manager.save_drafts.assert_awaited()
+        mock_sync.assert_awaited_once()
+
+    async def test_execute_rejects_invalid_count(
+        self,
+        session_manager: AsyncMock,
+    ) -> None:
+        context = ToolContext(
+            session_id="sess-gen-001",
+            user_id="user-gen-001",
+            project_id="MDP",
+            access_token=None,
+        )
+
+        result = await GenerateUserStoriesTool(session_manager).execute(
+            context,
+            requirements="Generate Epics",
+            count=0,
+        )
+
+        assert result.status == ToolStatus.ERROR
+        assert result.error == "Count must be an integer between 1 and 10."
+
+    @patch("src.mcp_tools.generation.sync_drafts_to_conversation", new_callable=AsyncMock)
+    @patch("src.mcp_tools.generation.get_settings")
+    @patch("src.mcp_tools.generation.AzureOpenAIClient")
     async def test_execute_success(
         self,
         mock_openai_cls: MagicMock,

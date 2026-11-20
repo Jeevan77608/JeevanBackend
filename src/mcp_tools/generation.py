@@ -152,8 +152,8 @@ class GenerateUserStoriesTool(BaseTool):
         return ToolDefinition(
             name="generate_user_stories",
             description=(
-                "Generate user stories from natural language requirements using AI. "
-                "Can use existing work items as context for better generation."
+                "Generate user stories or Epics from natural language requirements using AI. "
+                "Follow the requested work item type and count; use existing work items as context when provided."
             ),
             parameters=[
                 ToolParameter(
@@ -185,13 +185,12 @@ class GenerateUserStoriesTool(BaseTool):
                 ),
                 ToolParameter(
                     name="count",
-                    type="number",
-                    description="Approximate number of stories to generate (1-10)",
+                    type="integer",
+                    description="Exact number of work items to generate (1-10), when specified by the user.",
                     required=False,
-                    default=3,
                 ),
             ],
-            returns="Generated user stories as draft work items",
+            returns="Generated user stories or Epics as draft work items",
             category="generation",
             examples=[
                 "Generate user stories for a login feature",
@@ -206,7 +205,6 @@ class GenerateUserStoriesTool(BaseTool):
         **kwargs: Any,
     ) -> ToolResult:
         """Execute generate_user_stories."""
-        context.require_auth()
         context.require_project()
 
         params = self.validate_params(**kwargs)
@@ -214,6 +212,13 @@ class GenerateUserStoriesTool(BaseTool):
         additional_context = params.get("additional_context") or ""
         source_work_item_ids = params.get("source_work_item_ids") or []
         file_id = params.get("file_id")
+        count = params.get("count")
+        if count is not None and (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 1 <= count <= 10
+        ):
+            return ToolResult.failure("Count must be an integer between 1 and 10.")
 
         # Build structured context from all sources (with size limits)
         context_sections: list[str] = []
@@ -276,6 +281,7 @@ class GenerateUserStoriesTool(BaseTool):
                     requirements=requirements,
                     context=additional_context,
                     board_context=board_context,
+                    count=count,
                 )
 
             # Store drafts in session

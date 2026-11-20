@@ -861,6 +861,7 @@ class AzureOpenAIClient:
         requirements: str,
         context: str | None = None,
         board_context: BoardContext | None = None,
+        count: int | None = None,
     ) -> GenerationResult:
         """
         Generate User Stories from requirements.
@@ -874,6 +875,10 @@ class AzureOpenAIClient:
             GenerationResult with draft work items
         """
         user_prompt = f"Requirements:\n{requirements}"
+        if count is not None:
+            user_prompt = (
+                f"Generate exactly {count} work item(s).\n\n{user_prompt}"
+            )
         if context:
             user_prompt = f"Context:\n{context}\n\n{user_prompt}"
 

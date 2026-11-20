@@ -740,6 +740,7 @@ class TestGenerateUserStories:
         await client.generate_user_stories(
             "Build a dashboard",
             context="Existing Epic: Analytics Platform",
+            count=6,
         )
 
         # Verify the user prompt includes context
@@ -747,6 +748,7 @@ class TestGenerateUserStories:
         user_prompt = call_args.kwargs["user_prompt"]
         assert "Existing Epic: Analytics Platform" in user_prompt
         assert "Build a dashboard" in user_prompt
+        assert "Generate exactly 6 work item(s)." in user_prompt
         await client.__aexit__(None, None, None)
 
     async def test_generate_user_stories_with_board_context(self) -> None:
