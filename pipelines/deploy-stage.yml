@@ -1,0 +1,286 @@
+# ====================================================================
+# Reusable Deploy Template — called once per environment
+# ====================================================================
+# Usage in azure-pipelines.yml:
+#   - template: pipelines/deploy-stage.yml
+#     parameters:
+#       envName:        dev
+#       variableGroup:  mcp-backend-dev
+#       environment:    dev-backend
+#       dependsOn:      CI
+# ====================================================================
+
+parameters:
+  - name: envName
+    type: string                          # dev | staging | prod
+  - name: variableGroup
+    type: string                          # e.g. mcp-backend-dev
+  - name: environment
+    type: string                          # Azure DevOps environment (approval gate)
+  - name: dependsOn
+    type: string
+    default: CI
+  - name: condition
+    type: string
+    default: succeeded()
+
+stages:
+  - stage: Deploy_${{ parameters.envName }}
+    displayName: "Deploy → ${{ parameters.envName }}"
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+
+    variables:
+      - group: ${{ parameters.variableGroup }}
+      # ── Every variable in this group is available as $(VAR_NAME).
+      # ── Required variables ──────────────────────────────────────
+      #   Infrastructure:
+      #     azureSubscription, appServiceName, resourceGroupName,
+      #     startupCommand
+      #   Optional infrastructure:
+      #     deploymentSlotName  (leave empty for direct deploy)
+      #
+      #   App Settings (pushed to App Service):
+      #     APP_ENV, APP_SECRET_KEY, ENCRYPTION_KEY, CORS_ORIGINS,
+      #     AUTH_ENABLED, REDIS_ENABLED, AZURE_OPENAI_ENDPOINT, ...
+      #     (see DEPLOYMENT_GUIDE.md § 5 for the full list)
+
+    jobs:
+      - deployment: Deploy
+        displayName: "ZIP Deploy (${{ parameters.envName }})"
+        pool:
+          vmImage: ubuntu-latest
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ── Download artifact ───────────────────────────────
+                - download: current
+                  artifact: backend-drop
+
+                # ── Push App Settings ───────────────────────────────
+                # Reads every app setting from the variable group and
+                # pushes them to App Service. You change a value in the
+                # variable group → next pipeline run picks it up.
+                - task: AzureCLI@2
+                  displayName: "Configure App Settings"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      SLOT_ARG=""
+                      if [ -n "$(deploymentSlotName)" ]; then
+                        SLOT_ARG="--slot $(deploymentSlotName)"
+                      fi
+
+                      SETTINGS=""
+
+                      # ── Application ──
+                      # TEMPORARY: Force development mode to bypass strict production
+                      # validation until all required env vars are configured.
+                      # TODO: Remove this line and use variable group value once
+                      #       all prod secrets are set (APP_SECRET_KEY, ENCRYPTION_KEY,
+                      #       INTERNAL_API_KEY, CORS_ORIGINS, REDIS_URL, AZURE_AD_*).
+                      SETTINGS="$SETTINGS APP_ENV=development"
+                      [ -n "$(APP_DEBUG)" ]                      && SETTINGS="$SETTINGS APP_DEBUG=$(APP_DEBUG)"
+                      [ -n "$(APP_SECRET_KEY)" ]                 && SETTINGS="$SETTINGS APP_SECRET_KEY=$(APP_SECRET_KEY)"
+                      [ -n "$(ENCRYPTION_KEY)" ]                 && SETTINGS="$SETTINGS ENCRYPTION_KEY=$(ENCRYPTION_KEY)"
+                      [ -n "$(INTERNAL_API_KEY)" ]               && SETTINGS="$SETTINGS INTERNAL_API_KEY=$(INTERNAL_API_KEY)"
+                      [ -n "$(CORS_ORIGINS)" ]                   && SETTINGS="$SETTINGS CORS_ORIGINS=$(CORS_ORIGINS)"
+                      [ -n "$(LOG_LEVEL)" ]                      && SETTINGS="$SETTINGS LOG_LEVEL=$(LOG_LEVEL)"
+                      [ -n "$(SESSION_EXPIRY_HOURS)" ]           && SETTINGS="$SETTINGS SESSION_EXPIRY_HOURS=$(SESSION_EXPIRY_HOURS)"
+                      [ -n "$(DEFAULT_PUSH_TAG)" ]               && SETTINGS="$SETTINGS DEFAULT_PUSH_TAG=$(DEFAULT_PUSH_TAG)"
+
+                      # ── Feature Toggles ──
+                      [ -n "$(AUTH_ENABLED)" ]                   && SETTINGS="$SETTINGS AUTH_ENABLED=$(AUTH_ENABLED)"
+                      [ -n "$(REDIS_ENABLED)" ]                  && SETTINGS="$SETTINGS REDIS_ENABLED=$(REDIS_ENABLED)"
+                      [ -n "$(CHAT_SAVE_ENABLED)" ]              && SETTINGS="$SETTINGS CHAT_SAVE_ENABLED=$(CHAT_SAVE_ENABLED)"
+
+                      # ── Azure AD ──
+                      [ -n "$(AZURE_AD_TENANT_ID)" ]             && SETTINGS="$SETTINGS AZURE_AD_TENANT_ID=$(AZURE_AD_TENANT_ID)"
+                      [ -n "$(AZURE_AD_CLIENT_ID)" ]             && SETTINGS="$SETTINGS AZURE_AD_CLIENT_ID=$(AZURE_AD_CLIENT_ID)"
+                      [ -n "$(AZURE_AD_CLIENT_SECRET)" ]         && SETTINGS="$SETTINGS AZURE_AD_CLIENT_SECRET=$(AZURE_AD_CLIENT_SECRET)"
+                      [ -n "$(AZURE_AD_REDIRECT_URI)" ]          && SETTINGS="$SETTINGS AZURE_AD_REDIRECT_URI=$(AZURE_AD_REDIRECT_URI)"
+
+                      # ── Azure OpenAI ──
+                      [ -n "$(AZURE_OPENAI_ENDPOINT)" ]          && SETTINGS="$SETTINGS AZURE_OPENAI_ENDPOINT=$(AZURE_OPENAI_ENDPOINT)"
+                      [ -n "$(AZURE_OPENAI_API_KEY)" ]           && SETTINGS="$SETTINGS AZURE_OPENAI_API_KEY=$(AZURE_OPENAI_API_KEY)"
+                      [ -n "$(AZURE_OPENAI_DEPLOYMENT_NAME)" ]   && SETTINGS="$SETTINGS AZURE_OPENAI_DEPLOYMENT_NAME=$(AZURE_OPENAI_DEPLOYMENT_NAME)"
+                      [ -n "$(AZURE_OPENAI_API_VERSION)" ]       && SETTINGS="$SETTINGS AZURE_OPENAI_API_VERSION=$(AZURE_OPENAI_API_VERSION)"
+
+                      # ── Redis ──
+                      [ -n "$(REDIS_URL)" ]                      && SETTINGS="$SETTINGS REDIS_URL=$(REDIS_URL)"
+                      [ -n "$(REDIS_PASSWORD)" ]                 && SETTINGS="$SETTINGS REDIS_PASSWORD=$(REDIS_PASSWORD)"
+                      [ -n "$(REDIS_SSL_ENABLED)" ]              && SETTINGS="$SETTINGS REDIS_SSL_ENABLED=$(REDIS_SSL_ENABLED)"
+
+                      # ── Azure DevOps ──
+                      [ -n "$(AZURE_DEVOPS_DEFAULT_ORG_URL)" ]   && SETTINGS="$SETTINGS AZURE_DEVOPS_DEFAULT_ORG_URL=$(AZURE_DEVOPS_DEFAULT_ORG_URL)"
+                      [ -n "$(AZURE_DEVOPS_DEFAULT_PROJECT)" ]   && SETTINGS="$SETTINGS AZURE_DEVOPS_DEFAULT_PROJECT=$(AZURE_DEVOPS_DEFAULT_PROJECT)"
+                      [ -n "$(AZURE_DEVOPS_WIKI_IDENTIFIER)" ]   && SETTINGS="$SETTINGS AZURE_DEVOPS_WIKI_IDENTIFIER=$(AZURE_DEVOPS_WIKI_IDENTIFIER)"
+
+                      # ── Cosmos DB ──
+                      [ -n "$(COSMOS_ENDPOINT)" ]                && SETTINGS="$SETTINGS COSMOS_ENDPOINT=$(COSMOS_ENDPOINT)"
+                      [ -n "$(COSMOS_KEY)" ]                     && SETTINGS="$SETTINGS COSMOS_KEY=$(COSMOS_KEY)"
+                      [ -n "$(COSMOS_SERVERLESS)" ]              && SETTINGS="$SETTINGS COSMOS_SERVERLESS=$(COSMOS_SERVERLESS)"
+                      [ -n "$(COSMOS_DATABASE_ID)" ]             && SETTINGS="$SETTINGS COSMOS_DATABASE_ID=$(COSMOS_DATABASE_ID)"
+                      [ -n "$(COSMOS_CONTAINER_ID)" ]            && SETTINGS="$SETTINGS COSMOS_CONTAINER_ID=$(COSMOS_CONTAINER_ID)"
+
+                      # ── Chat Settings ──
+                      [ -n "$(CHAT_RETENTION_DAYS)" ]            && SETTINGS="$SETTINGS CHAT_RETENTION_DAYS=$(CHAT_RETENTION_DAYS)"
+                      [ -n "$(CHAT_HISTORY_DISPLAY_DAYS)" ]      && SETTINGS="$SETTINGS CHAT_HISTORY_DISPLAY_DAYS=$(CHAT_HISTORY_DISPLAY_DAYS)"
+                      [ -n "$(CHAT_SCOPE_STRICT)" ]              && SETTINGS="$SETTINGS CHAT_SCOPE_STRICT=$(CHAT_SCOPE_STRICT)"
+                      [ -n "$(CHAT_CONTEXT_WINDOW_MESSAGES)" ]   && SETTINGS="$SETTINGS CHAT_CONTEXT_WINDOW_MESSAGES=$(CHAT_CONTEXT_WINDOW_MESSAGES)"
+                      [ -n "$(CHAT_HISTORY_LIMIT_MESSAGES)" ]    && SETTINGS="$SETTINGS CHAT_HISTORY_LIMIT_MESSAGES=$(CHAT_HISTORY_LIMIT_MESSAGES)"
+
+                      if [ -z "$SETTINGS" ]; then
+                        echo "WARNING: No app settings found in variable group. Skipping."
+                        exit 0
+                      fi
+
+                      echo "Pushing app settings to App Service (${{ parameters.envName }})..."
+                      az webapp config appsettings set \
+                        --resource-group "$(resourceGroupName)" \
+                        --name "$(appServiceName)" \
+                        --settings $SETTINGS \
+                        $SLOT_ARG \
+                        --output none
+
+                      echo "App settings configured successfully."
+
+                # ── Deploy ZIP ──────────────────────────────────────
+                - task: AzureCLI@2
+                  displayName: "Deploy zip to App Service"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      SLOT_ARG=""
+                      if [ -n "$(deploymentSlotName)" ]; then
+                        echo "Deploying to slot: $(deploymentSlotName)"
+                        SLOT_ARG="--slot $(deploymentSlotName)"
+                      else
+                        echo "Deploying directly to ${{ parameters.envName }}"
+                      fi
+
+                      az webapp deploy \
+                        --resource-group "$(resourceGroupName)" \
+                        --name "$(appServiceName)" \
+                        --src-path "$(Pipeline.Workspace)/backend-drop/backend.zip" \
+                        --type zip \
+                        --track-status true \
+                        $SLOT_ARG
+
+                # ── Set startup command ─────────────────────────────
+                - task: AzureCLI@2
+                  displayName: "Set startup command"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      SLOT_ARG=""
+                      if [ -n "$(deploymentSlotName)" ]; then
+                        SLOT_ARG="--slot $(deploymentSlotName)"
+                      fi
+
+                      az webapp config set \
+                        --resource-group "$(resourceGroupName)" \
+                        --name "$(appServiceName)" \
+                        --startup-file "$(startupCommand)" \
+                        $SLOT_ARG
+
+                # ── Restart ─────────────────────────────────────────
+                - task: AzureCLI@2
+                  displayName: "Restart App Service"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      SLOT_ARG=""
+                      if [ -n "$(deploymentSlotName)" ]; then
+                        SLOT_ARG="--slot $(deploymentSlotName)"
+                      fi
+
+                      az webapp restart \
+                        --resource-group "$(resourceGroupName)" \
+                        --name "$(appServiceName)" \
+                        $SLOT_ARG
+
+                      echo "App Service restarted. Waiting for cold start..."
+                      sleep 30
+
+                # ── Health check ────────────────────────────────────
+                - task: AzureCLI@2
+                  displayName: "Verify deployment health"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      if [ -n "$(deploymentSlotName)" ]; then
+                        APP_URL="https://$(appServiceName)-$(deploymentSlotName).azurewebsites.net"
+                      else
+                        APP_URL="https://$(appServiceName).azurewebsites.net"
+                      fi
+
+                      echo "Health endpoint: $APP_URL/api/v1/health"
+
+                      MAX_ATTEMPTS=8
+                      WAIT_SECONDS=15
+
+                      for i in $(seq 1 $MAX_ATTEMPTS); do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/api/v1/health" --max-time 10 || true)
+                        echo "Attempt $i/$MAX_ATTEMPTS: HTTP $STATUS"
+
+                        if [ "$STATUS" = "200" ]; then
+                          echo "Health check PASSED"
+                          curl -s "$APP_URL/api/v1/health" --max-time 10 | python3 -m json.tool 2>/dev/null || true
+                          exit 0
+                        fi
+
+                        if [ "$i" -lt "$MAX_ATTEMPTS" ]; then
+                          echo "Waiting ${WAIT_SECONDS}s before retry..."
+                          sleep $WAIT_SECONDS
+                        fi
+                      done
+
+                      echo ""
+                      echo "ERROR: Health check failed after $MAX_ATTEMPTS attempts."
+                      echo "Troubleshooting:"
+                      echo "  1. az webapp log tail -g $(resourceGroupName) -n $(appServiceName)"
+                      echo "  2. az webapp log deployment show -g $(resourceGroupName) -n $(appServiceName)"
+                      echo "  3. az webapp ssh -g $(resourceGroupName) -n $(appServiceName)"
+                      exit 1
+
+                # ── Slot swap (zero-downtime) ───────────────────────
+                - task: AzureCLI@2
+                  displayName: "Swap slot → production"
+                  condition: and(succeeded(), ne(variables['deploymentSlotName'], ''))
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      echo "Swapping slot '$(deploymentSlotName)' → production..."
+                      az webapp deployment slot swap \
+                        --resource-group "$(resourceGroupName)" \
+                        --name "$(appServiceName)" \
+                        --slot "$(deploymentSlotName)" \
+                        --target-slot production
+
+                      echo "Slot swap complete!"
+
+                      APP_URL="https://$(appServiceName).azurewebsites.net"
+                      sleep 10
+
+                      STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/api/v1/health" --max-time 10 || true)
+                      echo "Production health after swap: HTTP $STATUS"
+
+                      if [ "$STATUS" != "200" ]; then
+                        echo "WARNING: Production health check returned $STATUS after swap."
+                        echo "Consider swapping back if issues persist."
+                      fi

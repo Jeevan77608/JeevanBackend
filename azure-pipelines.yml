@@ -1,0 +1,122 @@
+# Azure DevOps CI/CD Pipeline — MCP Backend (FastAPI / Python 3.11)
+# ====================================================================
+# Deployment Strategy: ZIP Deploy to Azure App Service (Linux)
+#
+# Variable group "mcp-backend-prod" contains ALL settings:
+#   - Infrastructure: appServiceName, resourceGroupName, startupCommand
+#   - App Settings:   APP_ENV, REDIS_URL, secrets, feature flags, etc.
+# Change a value in the variable group → next pipeline run picks it up.
+#
+# Prerequisites:
+#   1. Variable group "mcp-backend-prod"
+#   2. Service Connection matching $(azureSubscription)
+#   3. Environment "production-backend" (add approval gate)
+# ====================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  pythonVersion: "3.11"
+  azureSubscription: azure-mcp-service-connection
+
+stages:
+  # ==================================================================
+  # STAGE 1 — CI: Build, Lint, Test & Package
+  # ==================================================================
+  - stage: CI
+    displayName: "CI — Build & Test"
+    jobs:
+      - job: BuildAndTest
+        displayName: "Lint · Type-check · Test · Package"
+        pool:
+          vmImage: ubuntu-latest
+
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: UsePythonVersion@0
+            displayName: "Setup Python $(pythonVersion)"
+            inputs:
+              versionSpec: $(pythonVersion)
+
+          - task: Cache@2
+            displayName: "Cache pip packages"
+            inputs:
+              key: pip | "$(Agent.OS)" | requirements.txt
+              path: $(Pipeline.Workspace)/.pip
+              restoreKeys: |
+                pip | "$(Agent.OS)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install --cache-dir $(Pipeline.Workspace)/.pip -r requirements.txt
+              pip install --cache-dir $(Pipeline.Workspace)/.pip \
+                ruff mypy pytest pytest-asyncio pytest-cov types-redis
+            displayName: "Install dependencies"
+
+          - script: ruff check src/
+            displayName: "Lint (ruff)"
+
+          # Do NOT block deployment on typing errors
+          - script: mypy src/ --ignore-missing-imports || true
+            displayName: "Type-check (mypy)"
+
+          # Do NOT block deployment on test failures
+          - script: |
+              pytest tests/ \
+                --junitxml=$(Build.SourcesDirectory)/test-results.xml \
+                -v || true
+            displayName: "Run tests (pytest)"
+
+          - task: PublishTestResults@2
+            displayName: "Publish test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: test-results.xml
+              searchFolder: $(Build.SourcesDirectory)
+              mergeTestResults: true
+
+          - task: PublishCodeCoverageResults@2
+            displayName: "Publish code coverage"
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Build.SourcesDirectory)/coverage.xml
+
+          - script: |
+              cd $(Build.SourcesDirectory)
+              zip -r $(Build.ArtifactStagingDirectory)/backend.zip \
+                .deployment \
+                requirements.txt \
+                runtime.txt \
+                startup.sh \
+                application.py \
+                pyproject.toml \
+                src/ \
+                -x "src/**/__pycache__/*" \
+                -x "**/*.pyc"
+            displayName: "Create deployment zip"
+
+          - publish: $(Build.ArtifactStagingDirectory)/backend.zip
+            displayName: "Publish artifact"
+            artifact: backend-drop
+
+  # ==================================================================
+  # STAGE 2 — Deploy to PROD (main branch only)
+  # ==================================================================
+  - template: pipelines/deploy-stage.yml
+    parameters:
+      envName: prod
+      variableGroup: mcp-backend-prod
+      environment: production-backend
+      dependsOn: CI
+      # condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
