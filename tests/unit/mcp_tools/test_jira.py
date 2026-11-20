@@ -7,6 +7,7 @@ import pytest
 
 from src.mcp_tools.base import ToolContext, ToolStatus
 from src.mcp_tools.jira import (
+    ListJiraProjectsTool,
     SearchJiraIssuesTool,
     _adf_to_plain_text,
     _adf_text,
@@ -39,6 +40,47 @@ def test_adf_to_plain_text_extracts_issue_description() -> None:
             {"type": "paragraph", "content": [{"type": "text", "text": "Requirements"}]},
         ],
     }) == "Login\nRequirements"
+
+
+@pytest.mark.asyncio
+async def test_list_jira_projects_uses_session_connection_without_app_oauth_token() -> None:
+    session = SimpleNamespace(
+        integration_tokens={
+            "jira": {
+                "site_url": "https://example.atlassian.net",
+                "cloud_id": "jira-cloud-id",
+            }
+        }
+    )
+    manager = MagicMock()
+    manager.get_session = AsyncMock(return_value=session)
+    tool = ListJiraProjectsTool(manager)
+    tool._client.request = AsyncMock(
+        return_value={
+            "values": [
+                {"key": "MDP", "name": "My discovery project"},
+                {"key": "WAD", "name": "Web Application Development"},
+            ]
+        }
+    )
+
+    result = await tool.execute(
+        ToolContext(
+            session_id="session-id",
+            user_id="supabase:user",
+        )
+    )
+
+    assert result.status == ToolStatus.SUCCESS
+    assert [project["key"] for project in result.data["projects"]] == ["MDP", "WAD"]
+    tool._client.request.assert_awaited_once_with(
+        session,
+        manager,
+        "GET",
+        "project/search",
+        params={"maxResults": 100, "orderBy": "name"},
+        json_body=None,
+    )
 
 
 @pytest.mark.asyncio

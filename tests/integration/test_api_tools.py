@@ -340,3 +340,26 @@ async def test_execute_tool_value_error_returns_400(tools_app_client) -> None:
 
     assert response.status_code == 400
     assert "work_item_id is required" in response.json()["detail"]
+
+
+async def test_execute_tool_logs_traceback_for_unexpected_error(tools_app_client, caplog) -> None:
+    """Unexpected tool errors are logged with traceback but hidden from clients."""
+    client, _app = tools_app_client
+
+    mock_tool = MagicMock()
+    mock_tool.definition.name = "mock_unexpected_error_tool"
+    mock_tool.definition.description = "Tool that raises an unexpected exception"
+    mock_tool.definition.category = "test"
+    mock_tool.definition.parameters = []
+    mock_tool.execute = AsyncMock(side_effect=RuntimeError())
+
+    with patch("src.api.routes.create_all_tools", return_value=[mock_tool]):
+        response = await client.post(
+            "/api/v1/tools/execute",
+            json={"tool_name": "mock_unexpected_error_tool", "parameters": {}},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Tool execution failed. Please try again."
+    assert "Tool execution failed" in caplog.text
+    assert "RuntimeError" in caplog.text

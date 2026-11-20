@@ -45,7 +45,6 @@ class JiraTool(BaseTool):
         self._client = JiraCloudClient(get_settings())
 
     async def _session(self, context: ToolContext) -> SessionContext:
-        context.require_auth()
         return await self._session_manager.get_session(context.session_id)
 
     async def _request(
@@ -403,7 +402,6 @@ class PushToJiraTool(JiraTool):
         )
 
     async def execute(self, context: ToolContext, **kwargs: Any) -> ToolResult:
-        context.require_auth()
         try:
             project_key = self._project_key(context)
         except ValueError as error:
