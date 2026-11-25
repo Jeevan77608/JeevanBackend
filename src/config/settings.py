@@ -127,12 +127,11 @@ class AzureOpenAISettings(BaseSettings):
     )
 
     endpoint: str = Field(
-        ...,
+        default="",
         description="Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com/)",
     )
     api_key: SecretStr = Field(
-        ...,
-        min_length=1,
+        default=SecretStr(""),
         description="Azure OpenAI API key",
     )
     deployment_name: str = Field(
@@ -162,7 +161,7 @@ class AzureOpenAISettings(BaseSettings):
     @classmethod
     def validate_endpoint(cls, v: str) -> str:
         """Ensure endpoint ends with /."""
-        return v.rstrip("/") + "/"
+        return v.rstrip("/") + "/" if v else ""
 
 
 # =============================================================================

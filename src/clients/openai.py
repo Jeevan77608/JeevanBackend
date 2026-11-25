@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
@@ -158,6 +159,7 @@ class PromptTemplate(str, Enum):
     BUG = "bug"
     FEATURE = "feature"
     EPIC = "epic"
+    TEST_CASE = "test_case"
 
 
 # System prompts for different work item types (static defaults - use build_dynamic_prompt for board-aware generation)
@@ -172,13 +174,13 @@ CONTEXT GROUNDING — CRITICAL:
 - When multiple context sources are provided, cross-reference them to produce accurate, consistent work items.
 - Each work item should be traceable to specific details in the provided context.
 
-IMPORTANT - Mixed types: If the user asks for a mix (e.g. "3 user stories and 1 epic"), output each item with "work_item_type" set to "User Story" or "Epic" as appropriate. Otherwise default to "User Story".
+IMPORTANT - Work item types: If the user explicitly requests Features, Epics, or User Stories, use exactly that type for every generated item. For mixed requests, set each item's type accordingly. Otherwise default to "User Story".
 
 For each item, provide:
-1. work_item_type: "User Story" or "Epic" (use Epic only when the user explicitly asked for epics)
+1. work_item_type: "User Story", "Epic", or "Feature" (use the explicitly requested type; otherwise "User Story")
 2. title: Clear, concise title (do NOT put the word "epic" in the title for epics—use a real title)
-3. description: As a [user], I want [goal], so that [benefit] (for User Story) or business objectives (for Epic)
-4. acceptance_criteria: Testable criteria in Given/When/Then format (for User Story; optional for Epic)
+3. description: As a [user], I want [goal], so that [benefit] (for User Story), business objectives (for Epic), or user value and scope (for Feature)
+4. acceptance_criteria: Testable criteria in Given/When/Then format (for User Story; high-level outcomes for Epic or Feature)
 5. story_points: Estimate (1, 2, 3, 5, 8, 13)—always provide a number so it shows on the board
 6. priority: 1 (Critical), 2 (High), 3 (Medium), 4 (Low)
 
@@ -276,13 +278,13 @@ Example:
     PromptTemplate.BUG: """You are an expert QA engineer and bug analyst.
 Your task is to create detailed, actionable bug reports from issue descriptions.
 
-CONTEXT GROUNDING: Base every bug report strictly on the issue description and any provided context. Do NOT invent symptoms, steps, or behaviors not described. If details are missing, note them as "needs investigation" rather than guessing.
+CONTEXT GROUNDING: Base every bug report strictly on the issue description and any provided context. Do NOT invent symptoms, steps, or behaviors. If information is missing, write "Not specified" or "Needs investigation".
 
 For each Bug, provide:
 1. work_item_type: Always "Bug"
-2. title: Clear, specific description of the defect (not generic like "Bug in login")
-3. description: Include Expected Behavior, Actual Behavior, and Impact sections
-4. repro_steps: Numbered steps to reproduce, starting from a clean state
+2. title: Clear, specific description of the defect (not generic like "Bug in login"); prefix with a known product or module in square brackets when supplied (for example, [College ERP])
+3. description: Use readable Markdown sections in this order: Description; Environment; Expected Result; Suggested Enhancement (only when supported by the source); Actual Result; Impact; Subtasks (only when concrete subtasks are apparent, otherwise "None")
+4. repro_steps: Numbered Steps to Reproduce, preserving the user's sequence and prerequisites
 5. severity: 1 (Critical - system down), 2 (High - major feature broken), 3 (Medium - workaround exists), 4 (Low - cosmetic)
 6. priority: 1 (Critical), 2 (High), 3 (Medium), 4 (Low)
 
@@ -305,8 +307,8 @@ Example:
   "work_items": [
     {
       "work_item_type": "Bug",
-      "title": "Login session expires after 5 minutes despite 'Remember Me' checked",
-      "description": "Expected: Session persists for 30 days when Remember Me is selected.\\nActual: Session expires after ~5 minutes regardless of the checkbox state.\\nImpact: Users must re-authenticate frequently, disrupting workflow.",
+      "title": "[Authentication] Session expires despite Remember Me being selected",
+      "description": "## Description\\nThe session ends while Remember Me is enabled.\\n\\n## Environment\\nNot specified.\\n\\n## Expected Result\\nThe session remains active for the configured remembered-session period.\\n\\n## Suggested Enhancement\\nNeeds investigation.\\n\\n## Actual Result\\nThe session expires after approximately five minutes.\\n\\n## Impact\\nUsers must sign in repeatedly, disrupting work.\\n\\n## Subtasks\\nNone.",
       "repro_steps": "1. Navigate to the login page\\n2. Enter valid credentials\\n3. Check 'Remember Me'\\n4. Click 'Sign In'\\n5. Wait 5 minutes without activity\\n6. Attempt any action — user is redirected to login",
       "severity": 2,
       "priority": 2
@@ -367,6 +369,13 @@ Output valid JSON with this exact structure:
     }
   ]
 }""",
+
+    PromptTemplate.TEST_CASE: """You are a senior QA engineer. Create executable, independent test cases from the supplied story or requirement.
+Ground every case in the provided source. Do not invent product behavior; call out missing details as assumptions or questions.
+Cover positive, negative, boundary, validation, and permission scenarios where relevant. Avoid duplicate cases.
+Return valid JSON only with this schema:
+{"work_items":[{"work_item_type":"Test Case","title":"Clear scenario title","description":"Preconditions:\\n...\\nTest data:\\n...\\nSteps:\\n1. ...\\nExpected result:\\n...\\nCoverage: Positive|Negative|Boundary|Permission","acceptance_criteria":"The observable pass condition","priority":1}]}
+Create 5-10 cases by default, or follow an explicit count request. Use priority 1-4 (1 highest).""",
 }
 
 
@@ -665,10 +674,18 @@ class AzureOpenAIClient:
             settings: Azure OpenAI settings
         """
         self._settings = settings
-        self._endpoint = settings.endpoint
-        self._api_key = settings.api_key.get_secret_value()
-        self._deployment = settings.deployment_name
-        self._api_version = settings.api_version
+        self._provider = os.getenv("AI_PROVIDER", "azure").strip().lower()
+        if self._provider == "openai":
+            self._endpoint = (os.getenv("OPENAI_API_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/"
+            self._api_key = os.getenv("OPENAI_API_KEY", "")
+            self._deployment = os.getenv("OPENAI_MODEL", "gpt-6.2-sol")
+            self._api_version = ""
+        else:
+            self._provider = "azure"
+            self._endpoint = settings.endpoint
+            self._api_key = settings.api_key.get_secret_value()
+            self._deployment = settings.deployment_name
+            self._api_version = settings.api_version
 
         # HTTP client (initialized in __aenter__)
         self._client: httpx.AsyncClient | None = None
@@ -680,10 +697,13 @@ class AzureOpenAIClient:
 
     async def __aenter__(self) -> AzureOpenAIClient:
         """Async context manager entry."""
+        if not self._api_key:
+            provider_setting = "OPENAI_API_KEY" if self._provider == "openai" else "AZURE_OPENAI_API_KEY"
+            raise GenerationError(f"{provider_setting} must be configured for the selected AI provider")
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(120.0),  # Long timeout for generation
             headers={
-                "api-key": self._api_key,
+                **({"Authorization": f"Bearer {self._api_key}"} if self._provider == "openai" else {"api-key": self._api_key}),
                 "Content-Type": "application/json",
             },
         )
@@ -732,8 +752,9 @@ class AzureOpenAIClient:
         client = self._get_client()
 
         url = (
-            f"{self._endpoint}openai/deployments/{self._deployment}"
-            f"/chat/completions?api-version={self._api_version}"
+            f"{self._endpoint}chat/completions"
+            if self._provider == "openai"
+            else f"{self._endpoint}openai/deployments/{self._deployment}/chat/completions?api-version={self._api_version}"
         )
 
         output_tokens = max_tokens or self._settings.max_tokens
@@ -760,9 +781,14 @@ class AzureOpenAIClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": temperature or self._settings.temperature,
-            "max_tokens": output_tokens,
+            "max_completion_tokens" if self._provider == "openai" and self._deployment.startswith("gpt-6") else "max_tokens": output_tokens,
             "response_format": {"type": "json_object"},
         }
+        if self._provider == "openai":
+            payload["model"] = self._deployment
+            if self._deployment == "gpt-6.2-sol":
+                payload.pop("temperature", None)
+                payload["reasoning_effort"] = "medium"
 
         try:
             response = await client.post(url, json=payload)
@@ -996,6 +1022,31 @@ class AzureOpenAIClient:
         bug_type = board_context.bug_type if board_context else "Bug"
         work_items = self._parse_work_items(result["content"], bug_type)
 
+        return GenerationResult(
+            work_items=work_items,
+            prompt_tokens=result["usage"].get("prompt_tokens", 0),
+            completion_tokens=result["usage"].get("completion_tokens", 0),
+            model=result["model"],
+        )
+
+    async def generate_test_cases(
+        self,
+        requirement: str,
+        context: str | None = None,
+        count: int | None = None,
+    ) -> GenerationResult:
+        """Generate independently reviewable QA test case drafts."""
+        user_prompt = f"Requirement or user story:\n{requirement}"
+        if count is not None:
+            user_prompt = f"Generate exactly {count} test cases.\n\n{user_prompt}"
+        if context:
+            user_prompt = f"Additional context:\n{context}\n\n{user_prompt}"
+        result = await self._generate(
+            system_prompt=PromptTemplate.TEST_CASE.value,
+            user_prompt=user_prompt,
+            temperature=0.2,
+        )
+        work_items = self._parse_work_items(result["content"], "Test Case")
         return GenerationResult(
             work_items=work_items,
             prompt_tokens=result["usage"].get("prompt_tokens", 0),

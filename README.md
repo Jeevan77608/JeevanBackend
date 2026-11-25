@@ -120,6 +120,14 @@ Supabase dashboard. The frontend callback must be included in Supabase Auth's
 allowed redirect URLs, and Google Cloud must use Supabase's provider callback
 (`https://<project-ref>.supabase.co/auth/v1/callback`).
 
+The frontend also supports email/password sign-in and account registration
+through Supabase Auth. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` on the backend,
+and `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` on the
+frontend. The backend can keep `AUTH_PROVIDER=google` to preserve its existing
+Google OAuth flow while accepting Supabase password sessions. To share one
+identity between Google and password sign-in, configure Google in Supabase and
+set the frontend's `NEXT_PUBLIC_AUTH_PROVIDER=supabase` so both use Supabase.
+
 Run `supabase/migrations/20261120123400_jira_chat_storage.sql` in the Supabase
 SQL editor. It creates the RLS-protected conversations table, a backend-only
 file metadata table, and a private bucket for extracted upload text. Enable
@@ -221,6 +229,7 @@ endpoint, API key, deployment name, and API version.
 - **`generate_tasks`** — Breaks work items into actionable development tasks
 - **`generate_epic`** — Generates epic-level work items from high-level requirements
 - **`generate_bug_report`** — Creates structured bug reports (repro steps, severity, priority)
+- **`generate_test_cases`** — Creates reviewable QA drafts with preconditions, steps, expected results, and scenario coverage
 
 ### Review and Edit Tools
 - **`list_drafts`** — Returns all draft work items in the session

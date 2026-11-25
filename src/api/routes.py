@@ -27,6 +27,7 @@ Example:
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -34,9 +35,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status  # pyright: ignore[reportMissingImports]
+from fastapi.responses import JSONResponse  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel, Field  # pyright: ignore[reportMissingImports]
 
 from src.auth.dependencies import get_current_session, get_oauth_provider
 from src.auth.oauth import AzureADOAuthProvider
@@ -316,10 +317,18 @@ async def get_config() -> ConfigResponse:
 async def create_supabase_session(request: Request) -> dict[str, str]:
     """Validate a Supabase access token and create the app's encrypted session."""
     settings = get_settings()
-    if not settings.auth_enabled or settings.auth_provider != "supabase":
+    if not settings.auth_enabled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Supabase sign-in is not enabled.",
+            detail="Account sign-in is not enabled.",
+        )
+    if (
+        not settings.supabase_url
+        or not settings.supabase_anon_key.get_secret_value()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email/password sign-in needs Supabase URL and anonymous key configured.",
         )
 
     scheme, _, access_token = request.headers.get("authorization", "").partition(" ")

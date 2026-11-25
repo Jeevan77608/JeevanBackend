@@ -734,6 +734,53 @@ class GenerateBugReportTool(BaseTool):
             return ToolResult.failure(f"AI service error: {e}")
 
 
+class GenerateTestCasesTool(BaseTool):
+    """Generate independently reviewable QA test case drafts."""
+
+    def __init__(self, session_manager: SessionManager) -> None:
+        self._session_manager = session_manager
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="generate_test_cases",
+            description="Create deduplicated, executable positive, negative, boundary, and permission test cases from a requirement or user story. Each case is saved as a reviewable Jira draft.",
+            parameters=[
+                ToolParameter(name="requirement", type="string", description="User story or requirement to test", required=True),
+                ToolParameter(name="additional_context", type="string", description="Environment, constraints, or test data context", required=False),
+                ToolParameter(name="count", type="integer", description="Requested number of cases (1-20)", required=False),
+            ],
+            returns="Test case drafts with preconditions, data, steps, and expected results",
+            category="generation",
+            examples=["Create test cases for the certificate generation story"],
+        )
+
+    async def execute(self, context: ToolContext, **kwargs: Any) -> ToolResult:
+        context.require_auth()
+        context.require_project()
+        params = self.validate_params(**kwargs)
+        count = params.get("count")
+        if count is not None and (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 20):
+            return ToolResult.failure("Count must be an integer between 1 and 20.")
+        try:
+            async with AzureOpenAIClient(get_settings().azure_openai) as client:
+                result = await client.generate_test_cases(
+                    requirement=params["requirement"],
+                    context=params.get("additional_context"),
+                    count=count,
+                )
+            for item in result.work_items:
+                await add_draft_to_session(self._session_manager, context.session_id, context.project_name or "unknown", item)
+            await sync_drafts_to_conversation(context, self._session_manager)
+            return ToolResult.success(
+                data={"work_items": [{"draft_id": item.draft_id, "type": item.work_item_type, "title": item.title, "description": item.description, "acceptance_criteria": item.acceptance_criteria, "priority": item.priority} for item in result.work_items], "usage": {"model": result.model, "prompt_tokens": result.prompt_tokens, "completion_tokens": result.completion_tokens}},
+                message=f"Generated {len(result.work_items)} test case(s)",
+            )
+        except (ContextLengthError, GenerationError, OpenAIError) as error:
+            logger.error("Test case generation failed: %s", error)
+            return ToolResult.failure(f"Failed to generate test cases: {error}")
+
+
 # =============================================================================
 # Refine Item Tool
 # =============================================================================
@@ -978,5 +1025,6 @@ def create_generation_tools(session_manager: SessionManager) -> list[BaseTool]:
         GenerateTasksTool(session_manager),
         GenerateTasksBatchTool(session_manager),
         GenerateBugReportTool(session_manager),
+        GenerateTestCasesTool(session_manager),
         RefineItemTool(session_manager),
     ]
