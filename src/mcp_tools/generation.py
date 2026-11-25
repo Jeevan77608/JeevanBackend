@@ -294,7 +294,7 @@ class GenerateUserStoriesTool(BaseTool):
 
         settings = get_settings()
 
-        # Fetch board context for dynamic prompts
+        # Fetch board context for dynamic prompts.
         board_context = None
         if context.project_name:
             board_context = await self._session_manager.get_board_context(
@@ -702,83 +702,75 @@ class GenerateBugReportTool(BaseTool):
 
         settings = get_settings()
 
-        # Fetch board context for dynamic prompts
         board_context = None
-        if context.project_name:
-            board_context = await self._session_manager.get_board_context(
-                session_id=context.session_id,
-                project_id=context.project_name,
-            )
-
+        work_items: list[DraftWorkItem]
+        fallback_error: str | None = None
         try:
+            # Fetch board context inside the guarded generation path.
+            if context.project_name:
+                board_context = await self._session_manager.get_board_context(
+                    session_id=context.session_id,
+                    project_id=context.project_name,
+                )
             async with AzureOpenAIClient(settings.azure_openai) as client:
                 result = await client.generate_bug_report(
                     issue_description=issue_description,
                     context=additional_context,
                     board_context=board_context,
                 )
+            work_items = result.work_items
 
-            # Store drafts in session
-            for item in result.work_items:
-                await add_draft_to_session(
-                    session_manager=self._session_manager,
-                    session_id=context.session_id,
-                    project_id=context.project_name or "unknown",
-                    draft_item=item,
-                )
-
-            await sync_drafts_to_conversation(context, self._session_manager)
-            return ToolResult.success(
-                data={
-                    "work_items": [
-                        {
-                            "draft_id": item.draft_id,
-                            "type": item.work_item_type,
-                            "title": item.title,
-                            "description": item.description,
-                            "priority": item.priority,
-                        }
-                        for item in result.work_items
-                    ],
-                    "usage": {
-                        "prompt_tokens": result.prompt_tokens,
-                        "completion_tokens": result.completion_tokens,
-                        "model": result.model,
-                    },
-                    "context_source_ids": source_work_item_ids,
-                },
-                message=f"Generated {len(result.work_items)} bug report(s)",
-            )
-
-        except OpenAIError as e:
-            logger.error(f"AI bug generation failed; creating a reviewable fallback draft: {e}")
-            fallback = _build_fallback_bug_draft(
+        except Exception as e:
+            logger.exception("Bug generation failed; creating a reviewable fallback draft")
+            fallback_error = str(e)
+            work_items = [_build_fallback_bug_draft(
                 issue_description,
                 additional_context,
                 board_context.bug_type if board_context else "Bug",
-            )
+            )]
+
+        # Store drafts only after generation has completed, to avoid duplicate
+        # drafts if conversation synchronization fails after a successful save.
+        for item in work_items:
             await add_draft_to_session(
                 session_manager=self._session_manager,
                 session_id=context.session_id,
                 project_id=context.project_name or "unknown",
-                draft_item=fallback,
+                draft_item=item,
             )
-            await sync_drafts_to_conversation(context, self._session_manager)
+        await sync_drafts_to_conversation(context, self._session_manager)
+        work_items_data = [
+            {
+                "draft_id": item.draft_id,
+                "type": item.work_item_type,
+                "title": item.title,
+                "description": item.description,
+                "priority": item.priority,
+            }
+            for item in work_items
+        ]
+        if fallback_error:
             return ToolResult.success(
                 data={
-                    "work_items": [{
-                        "draft_id": fallback.draft_id,
-                        "type": fallback.work_item_type,
-                        "title": fallback.title,
-                        "description": fallback.description,
-                        "priority": fallback.priority,
-                    }],
+                    "work_items": work_items_data,
                     "generation_warning": "AI generation was unavailable. This structured draft uses only supplied context and needs review.",
                     "fallback": True,
                     "context_source_ids": source_work_item_ids,
                 },
                 message="AI generation was unavailable, so a structured bug draft was created from the supplied context for your review.",
             )
+        return ToolResult.success(
+            data={
+                "work_items": work_items_data,
+                "usage": {
+                    "prompt_tokens": result.prompt_tokens,
+                    "completion_tokens": result.completion_tokens,
+                    "model": result.model,
+                },
+                "context_source_ids": source_work_item_ids,
+            },
+            message=f"Generated {len(work_items)} bug report(s)",
+        )
 
 
 class GenerateTestCasesTool(BaseTool):
