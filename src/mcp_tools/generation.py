@@ -70,6 +70,33 @@ from src.session.manager import SessionManager
 logger = logging.getLogger(__name__)
 
 
+def _build_fallback_bug_draft(issue_description: str, additional_context: str, bug_type: str = "Bug") -> DraftWorkItem:
+    """Build a factual, reviewable bug draft when the AI provider is unavailable."""
+    import uuid
+
+    source_text = f"{issue_description}\n{additional_context}"
+    source_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\s*:\s*([^\r\n]+)", source_text)
+    source_ref = f"{source_match.group(1)}: {source_match.group(2).strip()}" if source_match else "selected Jira issue"
+    actual = "The user reports that the behavior described by the source issue is not working; the exact observed result/error was not specified."
+
+    return DraftWorkItem(
+        draft_id=str(uuid.uuid4()),
+        work_item_type=bug_type,
+        title=f"Reported behavior is not working — {source_ref}",
+        description=(
+            f"<b>Description</b><br>Reported issue based on {source_ref}. "
+            "Review the source issue for the intended flow and acceptance criteria.<br><br>"
+            "<b>Environment</b><br>Not specified.<br><br>"
+            f"<b>Expected Result</b><br>As described in the source issue ({source_ref}); confirm the exact acceptance criteria during review.<br><br>"
+            f"<b>Actual Result</b><br>{actual}<br><br>"
+            f"<b>Steps to Reproduce</b><br>Follow the flow documented in {source_ref}. Exact reproduction steps were not provided.<br><br>"
+            "<b>Impact</b><br>Needs investigation.<br><br>"
+            "<b>Suggested Enhancement</b><br>Investigate the reported failure and restore the behavior documented in the source issue."
+        ),
+        tags=["AI fallback", "Needs review"],
+    )
+
+
 async def add_draft_to_session(
     session_manager: SessionManager,
     session_id: str,
@@ -723,15 +750,35 @@ class GenerateBugReportTool(BaseTool):
                 message=f"Generated {len(result.work_items)} bug report(s)",
             )
 
-        except ContextLengthError as e:
-            logger.warning(f"Context too large: {e}")
-            return ToolResult.failure(str(e))
-        except GenerationError as e:
-            logger.error(f"Generation failed: {e}")
-            return ToolResult.failure(f"Failed to generate bug report: {e}")
         except OpenAIError as e:
-            logger.error(f"OpenAI error: {e}")
-            return ToolResult.failure(f"AI service error: {e}")
+            logger.error(f"AI bug generation failed; creating a reviewable fallback draft: {e}")
+            fallback = _build_fallback_bug_draft(
+                issue_description,
+                additional_context,
+                board_context.bug_type if board_context else "Bug",
+            )
+            await add_draft_to_session(
+                session_manager=self._session_manager,
+                session_id=context.session_id,
+                project_id=context.project_name or "unknown",
+                draft_item=fallback,
+            )
+            await sync_drafts_to_conversation(context, self._session_manager)
+            return ToolResult.success(
+                data={
+                    "work_items": [{
+                        "draft_id": fallback.draft_id,
+                        "type": fallback.work_item_type,
+                        "title": fallback.title,
+                        "description": fallback.description,
+                        "priority": fallback.priority,
+                    }],
+                    "generation_warning": "AI generation was unavailable. This structured draft uses only supplied context and needs review.",
+                    "fallback": True,
+                    "context_source_ids": source_work_item_ids,
+                },
+                message="AI generation was unavailable, so a structured bug draft was created from the supplied context for your review.",
+            )
 
 
 class GenerateTestCasesTool(BaseTool):
